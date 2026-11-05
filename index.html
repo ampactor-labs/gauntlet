@@ -73,7 +73,13 @@ let checks = new Set(savedState.checks);
 let view = Number.isInteger(savedState.view) && savedState.view>=0 && savedState.view<12 ? savedState.view : new Date().getMonth();
 const now = new Date();
 const todayKey = String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');
-const leapYear = 2028;
+const leapYear = 2028; // only used so February always shows 29 days
+function weekdayYear(month, day){
+  // Use the current year so weekdays match a real calendar; Feb 29 uses the next leap year.
+  let y = now.getFullYear();
+  if(month===1 && day===29) while(new Date(y,1,29).getMonth()!==1) y++;
+  return y;
+}
 function flames(h){return '🔥'.repeat(h)}
 function saveState(){
   let bankedHeat=0;
@@ -91,7 +97,7 @@ function render(){
   for(let d=1; d<=dim; d++){
     const dd = String(d).padStart(2,'0'), key = mm+'-'+dd;
     const list = DATA.days[key]||[];
-    const dt = new Date(leapYear, view, d);
+    const dt = new Date(weekdayYear(view, d), view, d);
     const done = list.some((_,i)=>checks.has(key+':'+i));
     const sec = document.createElement('section');
     sec.className = 'day' + (key===todayKey?' today':'') + (done?' done':'');
