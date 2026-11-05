@@ -71,14 +71,72 @@ const savedState = (()=>{
 })();
 let checks = new Set(savedState.checks);
 let view = Number.isInteger(savedState.view) && savedState.view>=0 && savedState.view<12 ? savedState.view : new Date().getMonth();
-const now = new Date();
-const todayKey = String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');
+function keyOf(dt){return String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0')}
+// "now" is refreshed by checkDate() so a page left open past midnight (or New Year) stays correct.
+let now = new Date();
+let todayKey = keyOf(now);
 const leapYear = 2028; // only used so February always shows 29 days
+function isLeap(y){return new Date(y,1,29).getMonth()===1}
 function weekdayYear(month, day){
   // Use the current year so weekdays match a real calendar; Feb 29 uses the next leap year.
   let y = now.getFullYear();
-  if(month===1 && day===29) while(new Date(y,1,29).getMonth()!==1) y++;
+  if(month===1 && day===29) while(!isLeap(y)) y++;
   return y;
+}
+// ---- Floating holidays: resolve each rule to its real date for a given year ----
+const ORD = {first:1,second:2,third:3,fourth:4,fifth:5};
+const WDRX = WD.join('|'), MNRX = MN.join('|');
+function addDays(dt,n){return new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n)}
+function nthWeekday(y,mon,wd,nth){ // nth = 1..5 or 'last'
+  if(nth==='last'){const last=new Date(y,mon+1,0); return addDays(last,-((last.getDay()-wd+7)%7));}
+  const d = 1+((wd-new Date(y,mon,1).getDay()+7)%7)+7*(nth-1);
+  return d<=new Date(y,mon+1,0).getDate() ? new Date(y,mon,d) : null;
+}
+function anchorDate(name,y){
+  let m;
+  if(/^Thanksgiving$/.test(name)) return nthWeekday(y,10,4,4);              // 4th Thu of Nov (US)
+  if(/^Labor Day( in September)?$/.test(name)) return nthWeekday(y,8,1,1);  // 1st Mon of Sep (US)
+  if(/^Father's Day$/.test(name)) return nthWeekday(y,5,0,3);               // 3rd Sun of Jun
+  if(/^Daylight Saving Time begins( in March)?$/.test(name)) return nthWeekday(y,2,0,2); // 2nd Sun of Mar (US)
+  if((m=name.match(new RegExp('^(?:the )?(first|second|third|fourth|fifth|last) ('+WDRX+') (?:of|in) ('+MNRX+')$'))))
+    return nthWeekday(y,MN.indexOf(m[3]),WD.indexOf(m[2]),m[1]==='last'?'last':ORD[m[1]]);
+  return null;
+}
+function floatingDate(rule,y){
+  let m, a;
+  if((a=anchorDate(rule,y))) return a;
+  if((m=rule.match(/^day (after|before) (.+)$/)) && (a=anchorDate(m[2],y))) return addDays(a, m[1]==='after'?1:-1);
+  if((m=rule.match(new RegExp('^(?:first )?('+WDRX+') (after|before) (.+)$'))) && (a=anchorDate(m[3],y))){
+    const wd=WD.indexOf(m[1]);
+    return m[2]==='after' ? addDays(a, ((wd-a.getDay()+6)%7)+1) : addDays(a, -(((a.getDay()-wd+6)%7)+1));
+  }
+  if((m=rule.match(/^(\w+) days (after|before) (.+)$/))){
+    const n={one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10}[m[1]]||+m[1];
+    if(n && (a=anchorDate(m[3],y))) return addDays(a, m[2]==='after'?n:-n);
+  }
+  if((m=rule.match(new RegExp('^('+WDRX+') closest to ('+MNRX+') (\\d+)$')))){
+    const t=new Date(y,MN.indexOf(m[2]),+m[3]); let diff=(WD.indexOf(m[1])-t.getDay()+7)%7; if(diff>3) diff-=7;
+    return addDays(t,diff);
+  }
+  // Full weeks run Sunday–Saturday.
+  if((m=rule.match(new RegExp('^('+WDRX+') of the (first|second|third|fourth|last) full week (?:of|in) ('+MNRX+')$')))){
+    const mon=MN.indexOf(m[3]), wd=WD.indexOf(m[1]);
+    const sun = m[2]==='last' ? addDays(nthWeekday(y,mon,6,'last'),-6) : addDays(nthWeekday(y,mon,0,1),7*(ORD[m[2]]-1));
+    return addDays(sun,wd);
+  }
+  if((m=rule.match(new RegExp('^first ('+WDRX+') the (\\d+)(?:st|nd|rd|th) of the year$')))){
+    for(let mon=0;mon<12;mon++){const dt=new Date(y,mon,+m[2]); if(dt.getMonth()===mon && dt.getDay()===WD.indexOf(m[1])) return dt;}
+  }
+  return null;
+}
+let floatYear=null, floatByDay={};
+function floatingForYear(){
+  const y=now.getFullYear();
+  if(floatYear!==y){
+    floatYear=y; floatByDay={};
+    DATA.floating.forEach(h=>{const dt=floatingDate(h.rule,y); h.date=dt; if(dt) (floatByDay[keyOf(dt)]=floatByDay[keyOf(dt)]||[]).push(h);});
+  }
+  return floatByDay;
 }
 function flames(h){return '🔥'.repeat(h)}
 function saveState(){
@@ -90,7 +148,8 @@ function saveState(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify({checks:[...checks], view, bankedHeat}));
 }
 function render(){
-  document.getElementById('monthName').textContent = MN[view];
+  document.getElementById('monthName').textContent = MN[view]+' '+now.getFullYear();
+  const fbd = floatingForYear();
   const cal = document.getElementById('cal'); cal.innerHTML='';
   const mm = String(view+1).padStart(2,'0');
   const dim = new Date(leapYear, view+1, 0).getDate();
@@ -102,10 +161,14 @@ function render(){
     const sec = document.createElement('section');
     sec.className = 'day' + (key===todayKey?' today':'') + (done?' done':'');
     sec.id = 'day-'+key;
-    let inner = '<div class="dhead"><span class="d">'+WD[dt.getDay()]+', '+MN[view]+' '+d+'</span>'+(key===todayKey?'<span class="tag">TODAY</span>':(done?'<span class="tag">CONQUERED</span>':''))+'</div>';
+    const yNote = dt.getFullYear()!==now.getFullYear() ? ' <span class="hnote">(no Feb 29 in '+now.getFullYear()+'; next in '+dt.getFullYear()+')</span>' : '';
+    let inner = '<div class="dhead"><span class="d">'+WD[dt.getDay()]+', '+MN[view]+' '+d+yNote+'</span>'+(key===todayKey?'<span class="tag">TODAY</span>':(done?'<span class="tag">CONQUERED</span>':''))+'</div>';
     list.forEach((h,i)=>{
       const id = key+':'+i;
       inner += '<label class="hol"><input type="checkbox" data-id="'+id+'" '+(checks.has(id)?'checked':'')+'><span><span class="hn">'+h.name+'</span> <span class="heat" title="unhingedness '+h.heat+'/5">'+flames(h.heat)+'</span><br><span class="hnote">'+h.note+'</span></span></label>';
+    });
+    (fbd[key]||[]).forEach(h=>{
+      inner += '<div class="hol"><span class="heat" title="floating holiday">↻</span><span><span class="hn">'+h.name+'</span> <span class="heat" title="unhingedness '+h.heat+'/5">'+flames(h.heat)+'</span><br><span class="hnote">Floating ('+h.rule+') · '+h.note+'</span></span></div>';
     });
     sec.innerHTML = inner; cal.appendChild(sec);
   }
@@ -134,12 +197,28 @@ function score(){
 document.getElementById('prev').onclick=()=>{view=(view+11)%12; saveState(); render();};
 document.getElementById('next').onclick=()=>{view=(view+1)%12; saveState(); render();};
 document.getElementById('todayBtn').onclick=()=>{view=now.getMonth(); saveState(); render(); const el=document.getElementById('day-'+todayKey); if(el) el.scrollIntoView({block:'center'});};
-const fl = document.getElementById('floating');
-DATA.floating.forEach(h=>{
-  const div=document.createElement('div');
-  div.innerHTML = '<b>'+h.name+'</b> — '+h.rule+' · '+h.note+' <span class="heat">'+flames(h.heat)+'</span>';
-  fl.appendChild(div);
-});
+function renderFloating(){
+  floatingForYear();
+  const fl = document.getElementById('floating'); fl.innerHTML='';
+  DATA.floating.forEach(h=>{
+    const div=document.createElement('div');
+    const when = h.date ? ' <span class="heat">→ '+WD[h.date.getDay()].slice(0,3)+', '+MN[h.date.getMonth()].slice(0,3)+' '+h.date.getDate()+', '+h.date.getFullYear()+'</span>' : '';
+    div.innerHTML = '<b>'+h.name+'</b> — '+h.rule+when+' · '+h.note+' <span class="heat">'+flames(h.heat)+'</span>';
+    fl.appendChild(div);
+  });
+}
+// Keep "today" correct if the tab stays open across midnight or New Year.
+function checkDate(){
+  const n=new Date();
+  if(keyOf(n)===todayKey && n.getFullYear()===now.getFullYear()) return;
+  const followToday = view===now.getMonth();
+  now=n; todayKey=keyOf(n);
+  if(followToday){view=now.getMonth(); saveState();}
+  render(); renderFloating();
+}
+setInterval(checkDate, 60000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkDate(); });
+renderFloating();
 render();
 saveState();
 const t=document.getElementById('day-'+todayKey); if(t) t.scrollIntoView({block:'center'});
